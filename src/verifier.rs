@@ -409,7 +409,7 @@ impl Verifier {
                 Cell::new("Verified").fg(Color::Cyan),
             ]);
 
-        for (i, key) in keys.iter().enumerate().take(50) {
+        for (i, key) in keys.iter().enumerate() {
             table.add_row(vec![
                 Cell::new(i + 1).fg(Color::DarkGrey),
                 Cell::new(&key.finding.provider).fg(Color::Magenta),
