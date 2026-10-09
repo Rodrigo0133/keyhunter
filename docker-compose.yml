@@ -12,3 +12,15 @@ services:
     # command: ["scan", "-p", "openai"]
     # command: ["scan", "-p", "openai", "-v"]
     # command: ["patterns"]
+
+  bot-alertas:
+    build:
+      context: ./discord-notifier
+      dockerfile: dockerfile
+    container_name: bot-alertas
+    restart: unless-stopped
+    env_file:
+      - ./discord-notifier/.env
+    ports:
+      - "3000:3000"
+    init: true

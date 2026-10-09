@@ -23,3 +23,6 @@ results/
 # Environment
 .env
 .env.local
+
+discord-notifier/.env
+discord-notifier/node_modules/

@@ -1,4 +1,3 @@
-# Build stage
 FROM rust:bookworm as builder
 
 WORKDIR /app
