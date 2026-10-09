@@ -6,7 +6,6 @@ config.toml
 
 # Results
 results/
-*.json
 
 # IDE
 .idea/
