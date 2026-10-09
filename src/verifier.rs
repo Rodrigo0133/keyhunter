@@ -422,17 +422,11 @@ impl Verifier {
 
         println!("{table}");
 
-        if keys.len() > 50 {
-            println!(
-                "\n{} Showing first 50 of {} active keys. Check saved file for all.",
-                "ℹ".bright_blue(),
-                keys.len()
-            );
-        }
+        
 
         // Detailed list
         println!("\n{}", "Active Keys Details:".bright_white().underline());
-        for (i, key) in keys.iter().enumerate().take(20) {
+        for (i, key) in keys.iter().enumerate() {
             println!(
                 "\n{}. {} {}",
                 (i + 1).to_string().bright_black(),
