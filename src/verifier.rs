@@ -251,7 +251,7 @@ impl Verifier {
                                 "  {} {} {} ({})",
                                 "✓".green(),
                                 "ACTIVE".bright_red().bold(),
-                                verified.finding.key_masked.bright_yellow(),
+                                verified.finding.key.bright_yellow(),
                                 verified.finding.provider.bright_magenta()
                             ));
                         } else if verified.error_message.is_some() {
@@ -317,7 +317,7 @@ impl Verifier {
                     "{}. {} {}",
                     (i + 1).to_string().bright_black(),
                     key.finding.provider.bright_magenta(),
-                    key.finding.key_masked.bright_yellow()
+                    key.finding.key.bright_yellow()
                 );
                 println!(
                     "   {} {}",
@@ -411,7 +411,7 @@ impl Verifier {
                             "  {} {} {} ({})",
                             "✓".green(),
                             "ACTIVE".bright_red().bold(),
-                            verified.finding.key_masked.bright_yellow(),
+                            verified.finding.key.bright_yellow(),
                             verified.finding.provider.bright_magenta()
                         ));
                         active_keys.push(verified);
@@ -491,7 +491,7 @@ impl Verifier {
             table.add_row(vec![
                 Cell::new(i + 1).fg(Color::DarkGrey),
                 Cell::new(&key.finding.provider).fg(Color::Magenta),
-                Cell::new(&key.finding.key_masked).fg(Color::Red),
+                Cell::new(&key.finding.key).fg(Color::Red),
                 Cell::new(truncate(&key.finding.repo_name, 25)).fg(Color::Blue),
                 Cell::new(&key.finding.owner).fg(Color::Green),
                 Cell::new("✓ ACTIVE").fg(Color::Red),
@@ -507,7 +507,7 @@ impl Verifier {
                 "\n{}. {} {}",
                 (i + 1).to_string().bright_black(),
                 key.finding.provider.bright_magenta(),
-                key.finding.key_masked.bright_red()
+                key.finding.key.bright_red()
             );
             println!(
                 "   {} {}",

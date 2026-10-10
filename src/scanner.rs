@@ -759,7 +759,7 @@ impl Scanner {
             table.add_row(vec![
                 Cell::new(i + 1).fg(Color::DarkGrey),
                 Cell::new(&finding.provider).fg(Color::Magenta),
-                Cell::new(&finding.key_masked).fg(status_color),
+                Cell::new(&finding.key).fg(status_color),
                 Cell::new(truncate(&finding.repo_name, 25)).fg(Color::Blue),
                 Cell::new(&finding.owner).fg(Color::Green),
                 Cell::new(truncate(&finding.file_path, 20)).fg(Color::White),
@@ -782,7 +782,7 @@ impl Scanner {
                 "\n{}. {} {}",
                 (i + 1).to_string().bright_black(),
                 finding.provider.bright_magenta(),
-                finding.key_masked.bright_yellow()
+                finding.key.bright_yellow()
             );
             println!(
                 "   {} {}",
