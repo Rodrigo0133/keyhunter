@@ -316,24 +316,19 @@ impl Config {
                 path
             );
         }
-        let bytes =
-            fs::read(path).context(format!("Cannot read config file: {:?}", path))?;
+        let bytes = fs::read(path).context(format!("Cannot read config file: {:?}", path))?;
 
         // Tolerate UTF-16 (Windows Notepad "Unicode") and UTF-8 BOM.
         // fs::read_to_string fails with "stream did not contain valid UTF-8" for those.
         let mut content = if bytes.starts_with(&[0xFF, 0xFE]) {
-            let u16s: Vec<u16> = bytes[2..]
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
+            let (chunks, _) = bytes[2..].as_chunks::<2>();
+            let u16s: Vec<u16> = chunks.iter().map(|c| u16::from_le_bytes(*c)).collect();
             String::from_utf16(&u16s).context(
                 "Config file looks like UTF-16LE but has invalid chars. Re-save as UTF-8: cp config.toml.example config.toml",
             )?
         } else if bytes.starts_with(&[0xFE, 0xFF]) {
-            let u16s: Vec<u16> = bytes[2..]
-                .chunks_exact(2)
-                .map(|c| u16::from_be_bytes([c[0], c[1]]))
-                .collect();
+            let (chunks, _) = bytes[2..].as_chunks::<2>();
+            let u16s: Vec<u16> = chunks.iter().map(|c| u16::from_be_bytes(*c)).collect();
             String::from_utf16(&u16s).context(
                 "Config file looks like UTF-16BE but has invalid chars. Re-save as UTF-8: cp config.toml.example config.toml",
             )?

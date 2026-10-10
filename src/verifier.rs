@@ -622,46 +622,166 @@ impl Verifier {
 
     // ==================== AI/LLM Providers ====================
 
-    /// Verifies an OpenAI API key by listing available models.
+    /// Detects "valid key but no credits/quota" from an API error body.
     ///
-    /// Makes a GET request to `/v1/models` endpoint.
-    async fn verify_openai(client: &Client, key: &str) -> (bool, String, Option<String>) {
+    /// Used for precise verification: distinguishes revoked/invalid keys
+    /// from keys that authenticate but fail on first real use with
+    /// "Insufficient Balance" (the case in the screenshot).
+    fn is_no_balance_body(body: &str) -> bool {
+        let lower = body.to_lowercase();
+        lower.contains("insufficient")
+            || lower.contains("no balance")
+            || lower.contains("out of credit")
+            || lower.contains("credit balance")
+            || lower.contains("credit_balance")
+            || lower.contains("insufficient_credits")
+            || lower.contains("insufficient_quota")
+            || lower.contains("exceeded your current quota")
+            || lower.contains("billing")
+            || lower.contains("top_up")
+            || lower.contains("topped_up")
+            || lower.contains("top-up")
+            || lower.contains("payment required")
+            || lower.contains("requires payment")
+            || lower.contains("quota")
+    }
+
+    /// Minimal chat probe (max_tokens=1) against an OpenAI-compatible endpoint.
+    ///
+    /// Returns ACTIVE only if a real completion succeeds, so
+    /// "Insufficient Balance" keys are NOT marked active. Costs ~1 token
+    /// of the key owner's quota by design (precisão máxima mode).
+    async fn probe_openai_chat(
+        client: &Client,
+        servico: &str,
+        chat_url: &str,
+        key: &str,
+        body: &str,
+        method_label: &str,
+    ) -> (bool, String, Option<String>) {
         let resp = client
-            .get("https://api.openai.com/v1/models")
+            .post(chat_url)
             .header("Authorization", format!("Bearer {}", key))
+            .header("content-type", "application/json")
+            .body(body.to_string())
             .send()
             .await;
-
         match resp {
             Ok(r) => {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                        Self::send_alert(client, "OpenAI", key).await;
-                        (true, "GET /v1/models".to_string(), None)
+                        Self::send_alert(client, servico, key).await;
+                        (true, method_label.to_string(), None)
                     }
-                    401 => (false, "GET /v1/models".to_string(), None),
-                    429 => (
-                        false,
-                        "GET /v1/models".to_string(),
-                        Some("rate limited".to_string()),
-                    ),
+                    401 | 403 => {
+                        let err_body = r.text().await.unwrap_or_default();
+                        if Self::is_no_balance_body(&err_body) {
+                            (
+                                false,
+                                method_label.to_string(),
+                                Some("valid key, insufficient balance/quota".to_string()),
+                            )
+                        } else {
+                            (false, method_label.to_string(), None)
+                        }
+                    }
+                    400 | 402 | 429 => {
+                        let err_body = r.text().await.unwrap_or_default();
+                        if Self::is_no_balance_body(&err_body) {
+                            (
+                                false,
+                                method_label.to_string(),
+                                Some("valid key, insufficient balance/quota".to_string()),
+                            )
+                        } else if status == 429 {
+                            (
+                                false,
+                                method_label.to_string(),
+                                Some("rate limited".to_string()),
+                            )
+                        } else {
+                            let snippet: String = err_body.chars().take(160).collect();
+                            (
+                                false,
+                                method_label.to_string(),
+                                Some(format!("status {}: {}", status, snippet)),
+                            )
+                        }
+                    }
+                    _ => {
+                        let err_body = r.text().await.unwrap_or_default();
+                        if Self::is_no_balance_body(&err_body) {
+                            (
+                                false,
+                                method_label.to_string(),
+                                Some("valid key, insufficient balance/quota".to_string()),
+                            )
+                        } else {
+                            let snippet: String = err_body.chars().take(160).collect();
+                            (
+                                false,
+                                method_label.to_string(),
+                                Some(format!("status {}: {}", status, snippet)),
+                            )
+                        }
+                    }
+                }
+            }
+            Err(e) => (false, method_label.to_string(), Some(e.to_string())),
+        }
+    }
+
+    /// Verifies an OpenAI API key with a real minimal completion.
+    ///
+    /// Step 1: `GET /v1/models` (auth check).
+    /// Step 2: `POST /v1/chat/completions` with max_tokens=1 (usability check).
+    /// Keys with no billing return "Insufficient quota" here and are NOT
+    /// marked active — this avoids the "verificou ACTIVE mas deu
+    /// Insufficient Balance no uso" case.
+    async fn verify_openai(client: &Client, key: &str) -> (bool, String, Option<String>) {
+        const METHOD: &str = "GET /v1/models + POST /chat/completions (1 token)";
+        let models = client
+            .get("https://api.openai.com/v1/models")
+            .header("Authorization", format!("Bearer {}", key))
+            .send()
+            .await;
+
+        match models {
+            Ok(r) => {
+                let status = r.status().as_u16();
+                match status {
+                    200 => {
+                        Self::probe_openai_chat(
+                            client,
+                            "OpenAI",
+                            "https://api.openai.com/v1/chat/completions",
+                            key,
+                            r#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#,
+                            METHOD,
+                        )
+                        .await
+                    }
+                    401 => (false, METHOD.to_string(), None),
+                    429 => (false, METHOD.to_string(), Some("rate limited".to_string())),
                     _ => (
                         false,
-                        "GET /v1/models".to_string(),
-                        Some(format!("status {}", status)),
+                        METHOD.to_string(),
+                        Some(format!("models status {}", status)),
                     ),
                 }
             }
-            Err(e) => (false, "GET /v1/models".to_string(), Some(e.to_string())),
+            Err(e) => (false, METHOD.to_string(), Some(e.to_string())),
         }
     }
 
     /// Verifies an Anthropic API key by sending a minimal message.
     ///
-    /// Anthropic doesn't have a `/models` endpoint, so this sends a
-    /// minimal message request with max_tokens=1.
+    /// Already a real-use probe (max_tokens=1). Precise: 200 = usable.
+    /// 400/402/403 with billing/credit messages = valid key but no
+    /// balance → NOT active (returns explanatory error instead).
     async fn verify_anthropic(client: &Client, key: &str) -> (bool, String, Option<String>) {
+        const METHOD: &str = "POST /v1/messages (1 token)";
         let resp = client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", key)
@@ -677,136 +797,234 @@ impl Verifier {
                 match status {
                     200 => {
                         Self::send_alert(client, "Anthropic", key).await;
-                        (true, "POST /v1/messages".to_string(), None)
+                        (true, METHOD.to_string(), None)
                     }
-                    401 => (false, "POST /v1/messages".to_string(), None),
-                    400 => {
-                        // Check if it's an auth error or just bad request
+                    401 | 403 => (false, METHOD.to_string(), None),
+                    400 | 402 | 429 => {
+                        // Check if it's an auth error, no-balance, or just bad request
                         let body = r.text().await.unwrap_or_default();
                         if body.contains("invalid_api_key") || body.contains("authentication") {
-                            (false, "POST /v1/messages".to_string(), None)
+                            (false, METHOD.to_string(), None)
+                        } else if Self::is_no_balance_body(&body) {
+                            (
+                                false,
+                                METHOD.to_string(),
+                                Some("valid key, insufficient balance/credits".to_string()),
+                            )
+                        } else if status == 429 {
+                            (false, METHOD.to_string(), Some("rate limited".to_string()))
+                        } else if status == 400 {
+                            // Bad request but key might be valid (e.g. model AVC)
+                            // Still counts as auth-OK; but to avoid false ACTIVE
+                            // on billing errors handled above, keep active here.
+                            Self::send_alert(client, "Anthropic", key).await;
+                            (true, METHOD.to_string(), None)
                         } else {
-                            // Bad request but key might be valid
-                            (true, "POST /v1/messages".to_string(), None)
+                            let snippet: String = body.chars().take(160).collect();
+                            (
+                                false,
+                                METHOD.to_string(),
+                                Some(format!("status {}: {}", status, snippet)),
+                            )
                         }
                     }
-                    429 => (
-                        false,
-                        "POST /v1/messages".to_string(),
-                        Some("rate limited".to_string()),
-                    ),
-                    _ => (
-                        false,
-                        "POST /v1/messages".to_string(),
-                        Some(format!("status {}", status)),
-                    ),
+                    _ => {
+                        let body = r.text().await.unwrap_or_default();
+                        if Self::is_no_balance_body(&body) {
+                            (
+                                false,
+                                METHOD.to_string(),
+                                Some("valid key, insufficient balance/credits".to_string()),
+                            )
+                        } else {
+                            (
+                                false,
+                                METHOD.to_string(),
+                                Some(format!("status {}", status)),
+                            )
+                        }
+                    }
                 }
             }
-            Err(e) => (false, "POST /v1/messages".to_string(), Some(e.to_string())),
+            Err(e) => (false, METHOD.to_string(), Some(e.to_string())),
         }
     }
 
-    /// Verifies a Google AI (Gemini) API key by listing models.
+    /// Verifies a Google AI (Gemini) key with models + minimal generate.
+    ///
+    /// Step 1: `GET /v1/models` (auth). Step 2: minimal
+    /// `generateContent` on gemini-1.5-flash with maxOutputTokens=1.
+    /// No-balance/billing errors → NOT active.
     async fn verify_google(client: &Client, key: &str) -> (bool, String, Option<String>) {
+        const METHOD: &str = "GET /v1/models + POST :generateContent (1 token)";
         let url = format!(
             "https://generativelanguage.googleapis.com/v1/models?key={}",
             key
         );
-        let resp = client.get(&url).send().await;
+        let models = client.get(&url).send().await;
 
-        match resp {
+        match models {
             Ok(r) => {
                 let status = r.status().as_u16();
                 match status {
+                    400 | 401 | 403 => (false, METHOD.to_string(), None),
+                    429 => (false, METHOD.to_string(), Some("rate limited".to_string())),
                     200 => {
-                        Self::send_alert(client, "Google", key).await;
-                        (true, "GET /v1/models".to_string(), None)
+                        let gen_url = format!(
+                            "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={}",
+                            key
+                        );
+                        let probe = client
+                            .post(&gen_url)
+                            .header("content-type", "application/json")
+                            .body(r#"{"contents":[{"parts":[{"text":"hi"}]}],"generationConfig":{"maxOutputTokens":1}}"#)
+                            .send()
+                            .await;
+                        match probe {
+                            Ok(pr) => {
+                                let pstatus = pr.status().as_u16();
+                                match pstatus {
+                                    200 => {
+                                        Self::send_alert(client, "Google", key).await;
+                                        (true, METHOD.to_string(), None)
+                                    }
+                                    400 | 401 | 403 => {
+                                        let body = pr.text().await.unwrap_or_default();
+                                        if body.contains("API key not valid")
+                                            || body.contains("API_KEY_INVALID")
+                                        {
+                                            (false, METHOD.to_string(), None)
+                                        } else if Self::is_no_balance_body(&body) {
+                                            (
+                                                false,
+                                                METHOD.to_string(),
+                                                Some(
+                                                    "valid key, insufficient balance/quota"
+                                                        .to_string(),
+                                                ),
+                                            )
+                                        } else {
+                                            (false, METHOD.to_string(), None)
+                                        }
+                                    }
+                                    429 => {
+                                        let body = pr.text().await.unwrap_or_default();
+                                        if Self::is_no_balance_body(&body) {
+                                            (
+                                                false,
+                                                METHOD.to_string(),
+                                                Some(
+                                                    "valid key, insufficient balance/quota"
+                                                        .to_string(),
+                                                ),
+                                            )
+                                        } else {
+                                            (
+                                                false,
+                                                METHOD.to_string(),
+                                                Some("rate limited".to_string()),
+                                            )
+                                        }
+                                    }
+                                    _ => {
+                                        let body = pr.text().await.unwrap_or_default();
+                                        if Self::is_no_balance_body(&body) {
+                                            (
+                                                false,
+                                                METHOD.to_string(),
+                                                Some(
+                                                    "valid key, insufficient balance/quota"
+                                                        .to_string(),
+                                                ),
+                                            )
+                                        } else {
+                                            let snippet: String = body.chars().take(160).collect();
+                                            (
+                                                false,
+                                                METHOD.to_string(),
+                                                Some(format!("status {}: {}", pstatus, snippet)),
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => (false, METHOD.to_string(), Some(e.to_string())),
+                        }
                     }
-                    400 | 401 | 403 => (false, "GET /v1/models".to_string(), None),
-                    429 => (
-                        false,
-                        "GET /v1/models".to_string(),
-                        Some("rate limited".to_string()),
-                    ),
                     _ => (
                         false,
-                        "GET /v1/models".to_string(),
-                        Some(format!("status {}", status)),
+                        METHOD.to_string(),
+                        Some(format!("models status {}", status)),
                     ),
                 }
             }
-            Err(e) => (false, "GET /v1/models".to_string(), Some(e.to_string())),
+            Err(e) => (false, METHOD.to_string(), Some(e.to_string())),
         }
     }
 
-    /// Verifies a Groq API key by listing models.
+    /// Verifies a Groq key with models + minimal chat (precise).
     async fn verify_groq(client: &Client, key: &str) -> (bool, String, Option<String>) {
-        let resp = client
+        const METHOD: &str = "GET /openai/v1/models + POST /chat/completions (1 token)";
+        let models = client
             .get("https://api.groq.com/openai/v1/models")
             .header("Authorization", format!("Bearer {}", key))
             .send()
             .await;
 
-        match resp {
-            Ok(r) => {
-                let status = r.status().as_u16();
-                match status {
-                    200 => {
-                        Self::send_alert(client, "Groq", key).await;
-                        (true, "GET /openai/v1/models".to_string(), None)
-                    }
-                    401 => (false, "GET /v1/models".to_string(), None),
-                    429 => (
-                        false,
-                        "GET /v1/models".to_string(),
-                        Some("rate limited".to_string()),
-                    ),
-                    _ => (
-                        false,
-                        "GET /v1/models".to_string(),
-                        Some(format!("status {}", status)),
-                    ),
+        match models {
+            Ok(r) => match r.status().as_u16() {
+                200 => {
+                    Self::probe_openai_chat(
+                        client,
+                        "Groq",
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        key,
+                        r#"{"model":"llama-3.1-8b-instant","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#,
+                        METHOD,
+                    )
+                    .await
                 }
-            }
-            Err(e) => (false, "GET /v1/models".to_string(), Some(e.to_string())),
+                401 => (false, METHOD.to_string(), None),
+                429 => (false, METHOD.to_string(), Some("rate limited".to_string())),
+                s => (false, METHOD.to_string(), Some(format!("models status {}", s))),
+            },
+            Err(e) => (false, METHOD.to_string(), Some(e.to_string())),
         }
     }
 
-    /// Verifies an xAI Grok API key by listing available models (read-only).
+    /// Verifies an xAI Grok key with models + minimal chat (precise).
     async fn verify_grok(client: &Client, key: &str) -> (bool, String, Option<String>) {
-        let resp = client
+        const METHOD: &str = "GET /v1/models + POST /chat/completions (1 token)";
+        let models = client
             .get("https://api.x.ai/v1/models")
             .header("Authorization", format!("Bearer {}", key))
             .send()
             .await;
 
-        match resp {
-            Ok(r) => {
-                let status = r.status().as_u16();
-                match status {
-                    200 => {
-                        Self::send_alert(client, "xAI Grok", key).await;
-                        (true, "GET /v1/models".to_string(), None)
-                    }
-                    401 | 403 => (false, "GET /v1/models".to_string(), None),
-                    429 => (
-                        false,
-                        "GET /v1/models".to_string(),
-                        Some("rate limited".to_string()),
-                    ),
-                    _ => (
-                        false,
-                        "GET /v1/models".to_string(),
-                        Some(format!("status {}", status)),
-                    ),
+        match models {
+            Ok(r) => match r.status().as_u16() {
+                200 => {
+                    Self::probe_openai_chat(
+                        client,
+                        "xAI Grok",
+                        "https://api.x.ai/v1/chat/completions",
+                        key,
+                        r#"{"model":"grok-beta","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#,
+                        METHOD,
+                    )
+                    .await
                 }
-            }
-            Err(e) => (false, "GET /v1/models".to_string(), Some(e.to_string())),
+                401 | 403 => (false, METHOD.to_string(), None),
+                429 => (false, METHOD.to_string(), Some("rate limited".to_string())),
+                s => (false, METHOD.to_string(), Some(format!("models status {}", s))),
+            },
+            Err(e) => (false, METHOD.to_string(), Some(e.to_string())),
         }
     }
 
-    /// Verifies a Perplexity API key using the OpenAI-compatible API.
+    /// Verifies a Perplexity key with real chat + balance detection (precise).
     async fn verify_perplexity(client: &Client, key: &str) -> (bool, String, Option<String>) {
+        const METHOD: &str = "POST /chat/completions (1 token)";
         let resp = client
             .post("https://api.perplexity.ai/chat/completions")
             .header("Authorization", format!("Bearer {}", key))
@@ -821,26 +1039,47 @@ impl Verifier {
                 match status {
                     200 => {
                         Self::send_alert(client, "Perplexity", key).await;
-                        (true, "POST /chat/completions".to_string(), None)
+                        (true, METHOD.to_string(), None)
                     }
-                    401 => (false, "POST /chat/completions".to_string(), None),
-                    429 => (
-                        false,
-                        "POST /chat/completions".to_string(),
-                        Some("rate limited".to_string()),
-                    ),
-                    _ => (
-                        false,
-                        "POST /chat/completions".to_string(),
-                        Some(format!("status {}", status)),
-                    ),
+                    401 | 403 => (false, METHOD.to_string(), None),
+                    400 | 402 | 429 => {
+                        let body = r.text().await.unwrap_or_default();
+                        if Self::is_no_balance_body(&body) {
+                            (
+                                false,
+                                METHOD.to_string(),
+                                Some("valid key, insufficient balance/credits".to_string()),
+                            )
+                        } else if status == 429 {
+                            (false, METHOD.to_string(), Some("rate limited".to_string()))
+                        } else {
+                            let snippet: String = body.chars().take(160).collect();
+                            (
+                                false,
+                                METHOD.to_string(),
+                                Some(format!("status {}: {}", status, snippet)),
+                            )
+                        }
+                    }
+                    _ => {
+                        let body = r.text().await.unwrap_or_default();
+                        if Self::is_no_balance_body(&body) {
+                            (
+                                false,
+                                METHOD.to_string(),
+                                Some("valid key, insufficient balance/credits".to_string()),
+                            )
+                        } else {
+                            (
+                                false,
+                                METHOD.to_string(),
+                                Some(format!("status {}", status)),
+                            )
+                        }
+                    }
                 }
             }
-            Err(e) => (
-                false,
-                "POST /chat/completions".to_string(),
-                Some(e.to_string()),
-            ),
+            Err(e) => (false, METHOD.to_string(), Some(e.to_string())),
         }
     }
 
@@ -900,143 +1139,276 @@ impl Verifier {
         }
     }
 
-    /// Verifies a Fireworks AI API key by listing models.
+    /// Verifies a Fireworks key with models + minimal chat (precise).
     async fn verify_fireworks(client: &Client, key: &str) -> (bool, String, Option<String>) {
-        let resp = client
+        const METHOD: &str = "GET /inference/v1/models + POST /chat/completions (1 token)";
+        let models = client
             .get("https://api.fireworks.ai/inference/v1/models")
             .header("Authorization", format!("Bearer {}", key))
             .send()
             .await;
 
-        match resp {
-            Ok(r) => {
-                let status = r.status().as_u16();
-                match status {
-                    200 => {
-                        Self::send_alert(client, "Fireworks", key).await;
-                        (true, "GET /inference/v1/models".to_string(), None)
-                    }
-                    401 => (false, "GET /v1/models".to_string(), None),
-                    _ => (
-                        false,
-                        "GET /v1/models".to_string(),
-                        Some(format!("status {}", status)),
-                    ),
+        match models {
+            Ok(r) => match r.status().as_u16() {
+                200 => {
+                    Self::probe_openai_chat(
+                        client,
+                        "Fireworks",
+                        "https://api.fireworks.ai/inference/v1/chat/completions",
+                        key,
+                        r#"{"model":"accounts/fireworks/models/llama-v3-8b","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#,
+                        METHOD,
+                    )
+                    .await
                 }
-            }
-            Err(e) => (false, "GET /v1/models".to_string(), Some(e.to_string())),
+                401 | 403 => (false, METHOD.to_string(), None),
+                429 => (false, METHOD.to_string(), Some("rate limited".to_string())),
+                s => (false, METHOD.to_string(), Some(format!("models status {}", s))),
+            },
+            Err(e) => (false, METHOD.to_string(), Some(e.to_string())),
         }
     }
 
-    /// Verifies a Cohere API key by listing models.
+    /// Verifies a Cohere key with models + minimal chat (precise).
+    ///
+    /// Cohere chat uses `{"model","message"}` (not OpenAI `messages`).
     async fn verify_cohere(client: &Client, key: &str) -> (bool, String, Option<String>) {
-        let resp = client
+        const METHOD: &str = "GET /v1/models + POST /v1/chat (1 token)";
+        let models = client
             .get("https://api.cohere.ai/v1/models")
             .header("Authorization", format!("Bearer {}", key))
             .send()
             .await;
 
-        match resp {
-            Ok(r) => {
-                let status = r.status().as_u16();
-                match status {
-                    200 => {
-                        Self::send_alert(client, "Cohere", key).await;
-                        (true, "GET /v1/models".to_string(), None)
+        match models {
+            Ok(r) => match r.status().as_u16() {
+                401 | 403 => (false, METHOD.to_string(), None),
+                429 => (false, METHOD.to_string(), Some("rate limited".to_string())),
+                200 => {
+                    let probe = client
+                        .post("https://api.cohere.com/v1/chat")
+                        .header("Authorization", format!("Bearer {}", key))
+                        .header("content-type", "application/json")
+                        .body(r#"{"model":"command-light","message":"hi","max_tokens":1}"#)
+                        .send()
+                        .await;
+                    match probe {
+                        Ok(pr) => {
+                            let pstatus = pr.status().as_u16();
+                            match pstatus {
+                                200 => {
+                                    Self::send_alert(client, "Cohere", key).await;
+                                    (true, METHOD.to_string(), None)
+                                }
+                                401 | 403 => (false, METHOD.to_string(), None),
+                                _ => {
+                                    let body = pr.text().await.unwrap_or_default();
+                                    if Self::is_no_balance_body(&body) {
+                                        (
+                                            false,
+                                            METHOD.to_string(),
+                                            Some(
+                                                "valid key, insufficient balance/quota".to_string(),
+                                            ),
+                                        )
+                                    } else if pstatus == 429 {
+                                        (
+                                            false,
+                                            METHOD.to_string(),
+                                            Some("rate limited".to_string()),
+                                        )
+                                    } else {
+                                        let snippet: String = body.chars().take(160).collect();
+                                        (
+                                            false,
+                                            METHOD.to_string(),
+                                            Some(format!("status {}: {}", pstatus, snippet)),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => (false, METHOD.to_string(), Some(e.to_string())),
                     }
-                    401 => (false, "GET /v1/models".to_string(), None),
-                    _ => (
-                        false,
-                        "GET /v1/models".to_string(),
-                        Some(format!("status {}", status)),
-                    ),
                 }
-            }
-            Err(e) => (false, "GET /v1/models".to_string(), Some(e.to_string())),
+                s => (
+                    false,
+                    METHOD.to_string(),
+                    Some(format!("models status {}", s)),
+                ),
+            },
+            Err(e) => (false, METHOD.to_string(), Some(e.to_string())),
         }
     }
 
-    /// Verifies a Mistral AI API key by listing models.
+    /// Verifies a Mistral key with models + minimal chat (precise).
     async fn verify_mistral(client: &Client, key: &str) -> (bool, String, Option<String>) {
-        let resp = client
+        const METHOD: &str = "GET /v1/models + POST /chat/completions (1 token)";
+        let models = client
             .get("https://api.mistral.ai/v1/models")
             .header("Authorization", format!("Bearer {}", key))
             .send()
             .await;
 
-        match resp {
-            Ok(r) => {
-                let status = r.status().as_u16();
-                match status {
-                    200 => {
-                        Self::send_alert(client, "Mistral", key).await;
-                        (true, "GET /v1/models".to_string(), None)
-                    }
-                    401 => (false, "GET /v1/models".to_string(), None),
-                    _ => (
-                        false,
-                        "GET /v1/models".to_string(),
-                        Some(format!("status {}", status)),
-                    ),
+        match models {
+            Ok(r) => match r.status().as_u16() {
+                200 => {
+                    Self::probe_openai_chat(
+                        client,
+                        "Mistral",
+                        "https://api.mistral.ai/v1/chat/completions",
+                        key,
+                        r#"{"model":"mistral-tiny","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#,
+                        METHOD,
+                    )
+                    .await
                 }
-            }
-            Err(e) => (false, "GET /v1/models".to_string(), Some(e.to_string())),
+                401 | 403 => (false, METHOD.to_string(), None),
+                429 => (false, METHOD.to_string(), Some("rate limited".to_string())),
+                s => (false, METHOD.to_string(), Some(format!("models status {}", s))),
+            },
+            Err(e) => (false, METHOD.to_string(), Some(e.to_string())),
         }
     }
 
-    /// Verifies a Together AI API key by listing models.
+    /// Verifies a Together key with models + minimal chat (precise).
     async fn verify_together(client: &Client, key: &str) -> (bool, String, Option<String>) {
-        let resp = client
+        const METHOD: &str = "GET /v1/models + POST /chat/completions (1 token)";
+        let models = client
             .get("https://api.together.xyz/v1/models")
             .header("Authorization", format!("Bearer {}", key))
             .send()
             .await;
 
-        match resp {
-            Ok(r) => {
-                let status = r.status().as_u16();
-                match status {
-                    200 => {
-                        Self::send_alert(client, "Together", key).await;
-                        (true, "GET /v1/models".to_string(), None)
-                    }
-                    401 => (false, "GET /v1/models".to_string(), None),
-                    _ => (
-                        false,
-                        "GET /v1/models".to_string(),
-                        Some(format!("status {}", status)),
-                    ),
+        match models {
+            Ok(r) => match r.status().as_u16() {
+                200 => {
+                    Self::probe_openai_chat(
+                        client,
+                        "Together",
+                        "https://api.together.xyz/v1/chat/completions",
+                        key,
+                        r#"{"model":"meta-llama/Llama-3-8b-chat-hf","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#,
+                        METHOD,
+                    )
+                    .await
                 }
-            }
-            Err(e) => (false, "GET /v1/models".to_string(), Some(e.to_string())),
+                401 | 403 => (false, METHOD.to_string(), None),
+                429 => (false, METHOD.to_string(), Some("rate limited".to_string())),
+                s => (false, METHOD.to_string(), Some(format!("models status {}", s))),
+            },
+            Err(e) => (false, METHOD.to_string(), Some(e.to_string())),
         }
     }
 
-    /// Verifies a DeepSeek API key by listing models.
+    /// Verifies a DeepSeek key with models + balance (precise, no spend).
+    ///
+    /// Step 1: `GET /v1/models` (auth). Step 2: `GET /user/balance`
+    /// (read-only, costs nothing). ACTIVE only if `is_available=true`
+    /// and `total_balance > 0`. This fixes "ACTIVE mas Insufficient
+    /// Balance no OpenCode".
     async fn verify_deepseek(client: &Client, key: &str) -> (bool, String, Option<String>) {
-        let resp = client
+        const METHOD: &str = "GET /v1/models + GET /user/balance";
+        let models = client
             .get("https://api.deepseek.com/v1/models")
             .header("Authorization", format!("Bearer {}", key))
             .send()
             .await;
 
-        match resp {
+        let models_ok = match models {
+            Ok(r) => match r.status().as_u16() {
+                200 => true,
+                401 | 403 => return (false, METHOD.to_string(), None),
+                429 => return (false, METHOD.to_string(), Some("rate limited".to_string())),
+                s => {
+                    return (
+                        false,
+                        METHOD.to_string(),
+                        Some(format!("models status {}", s)),
+                    )
+                }
+            },
+            Err(e) => return (false, METHOD.to_string(), Some(e.to_string())),
+        };
+        debug_assert!(models_ok);
+
+        let bal = client
+            .get("https://api.deepseek.com/user/balance")
+            .header("Authorization", format!("Bearer {}", key))
+            .header("Accept", "application/json")
+            .send()
+            .await;
+
+        match bal {
             Ok(r) => {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                        Self::send_alert(client, "DeepSeek", key).await;
-                        (true, "GET /v1/models".to_string(), None)
+                        let body = r.text().await.unwrap_or_default();
+                        match serde_json::from_str::<serde_json::Value>(&body) {
+                            Ok(v) => {
+                                let available = v
+                                    .get("is_available")
+                                    .and_then(|x| x.as_bool())
+                                    .unwrap_or(false);
+                                let mut total = 0.0_f64;
+                                if let Some(arr) = v.get("balance_infos").and_then(|x| x.as_array())
+                                {
+                                    for info in arr {
+                                        if let Some(t) =
+                                            info.get("total_balance").and_then(|x| x.as_str())
+                                        {
+                                            if let Ok(n) = t.parse::<f64>() {
+                                                total += n;
+                                            }
+                                        }
+                                    }
+                                }
+                                if available && total > 0.0 {
+                                    Self::send_alert(client, "DeepSeek", key).await;
+                                    (true, METHOD.to_string(), None)
+                                } else {
+                                    (
+                                        false,
+                                        METHOD.to_string(),
+                                        Some(format!(
+                                            "valid key, insufficient balance (is_available={}, total={})",
+                                            available, total
+                                        )),
+                                    )
+                                }
+                            }
+                            Err(_) => {
+                                let snippet: String = body.chars().take(160).collect();
+                                (
+                                    false,
+                                    METHOD.to_string(),
+                                    Some(format!("balance parse failed: {}", snippet)),
+                                )
+                            }
+                        }
                     }
-                    401 => (false, "GET /v1/models".to_string(), None),
-                    _ => (
-                        false,
-                        "GET /v1/models".to_string(),
-                        Some(format!("status {}", status)),
-                    ),
+                    401 | 403 => (false, METHOD.to_string(), None),
+                    429 => (false, METHOD.to_string(), Some("rate limited".to_string())),
+                    _ => {
+                        let body = r.text().await.unwrap_or_default();
+                        if Self::is_no_balance_body(&body) {
+                            (
+                                false,
+                                METHOD.to_string(),
+                                Some("valid key, insufficient balance".to_string()),
+                            )
+                        } else {
+                            (
+                                false,
+                                METHOD.to_string(),
+                                Some(format!("balance status {}", status)),
+                            )
+                        }
+                    }
                 }
             }
-            Err(e) => (false, "GET /v1/models".to_string(), Some(e.to_string())),
+            Err(e) => (false, METHOD.to_string(), Some(e.to_string())),
         }
     }
 
@@ -1664,6 +2036,71 @@ mod tests {
             .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             .expect("write response");
         data
+    }
+
+    #[test]
+    fn test_is_no_balance_body_detects_insufficient() {
+        assert!(Verifier::is_no_balance_body("Insufficient Balance"));
+        assert!(Verifier::is_no_balance_body(
+            r#"{"error":{"message":"You exceeded your current quota","type":"insufficient_quota"}}"#
+        ));
+        assert!(Verifier::is_no_balance_body(
+            "Your credit balance is too low"
+        ));
+        assert!(Verifier::is_no_balance_body(
+            "Billing hard limit has been reached"
+        ));
+        assert!(!Verifier::is_no_balance_body("Invalid API key provided"));
+        assert!(!Verifier::is_no_balance_body(""));
+    }
+
+    #[test]
+    fn test_deepseek_balance_parsing_marks_empty_as_no_balance() {
+        let empty = serde_json::json!({
+            "is_available": false,
+            "balance_infos": [{"currency": "USD", "total_balance": "0.00"}]
+        });
+        let available = empty
+            .get("is_available")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let mut total = 0.0_f64;
+        for info in empty
+            .get("balance_infos")
+            .and_then(|x| x.as_array())
+            .unwrap()
+        {
+            total += info
+                .get("total_balance")
+                .and_then(|x| x.as_str())
+                .unwrap()
+                .parse::<f64>()
+                .unwrap();
+        }
+        assert!(!(available && total > 0.0));
+
+        let funded = serde_json::json!({
+            "is_available": true,
+            "balance_infos": [{"currency": "USD", "total_balance": "8.76"}]
+        });
+        let available = funded
+            .get("is_available")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let mut total = 0.0_f64;
+        for info in funded
+            .get("balance_infos")
+            .and_then(|x| x.as_array())
+            .unwrap()
+        {
+            total += info
+                .get("total_balance")
+                .and_then(|x| x.as_str())
+                .unwrap()
+                .parse::<f64>()
+                .unwrap();
+        }
+        assert!(available && total > 0.0);
     }
 
     #[tokio::test]
