@@ -19,6 +19,31 @@ use std::time::Duration;
 
 use crate::scanner::KeyFinding;
 
+/// Default alert relay URL (docker service `bot-alertas` -> discord-notifier).
+/// Overridable with the `KEYHUNTER_ALERT_URL` env var, e.g.
+/// `KEYHUNTER_ALERT_URL=http://localhost:3000/alertas` for runs outside docker.
+const ALERT_URL_DEFAULT: &str = "http://bot-alertas:3000/alertas";
+
+/// Alert relay URL, honoring the `KEYHUNTER_ALERT_URL` environment override.
+fn alert_url() -> String {
+    std::env::var("KEYHUNTER_ALERT_URL").unwrap_or_else(|_| ALERT_URL_DEFAULT.to_string())
+}
+
+/// Mascara uma chave para envio seguro em alertas.
+///
+/// Mostra os primeiros 8 e os ultimos 4 caracteres. A chave completa
+/// nunca deve ser transmitida para servicos externos.
+fn mask_key_for_alert(key: &str) -> String {
+    let len = key.len();
+    if len <= 8 {
+        return "*".repeat(len);
+    }
+    if len <= 16 {
+        return format!("{}...", &key[..8]);
+    }
+    format!("{}...{}", &key[..8], &key[len - 4..])
+}
+
 /// Represents a key that has been verified against its provider's API.
 ///
 /// Extends the original `KeyFinding` with verification results including
@@ -51,6 +76,31 @@ pub struct Verifier {
 }
 
 impl Verifier {
+    /// Envia um alerta de chave ativa para o servico externo.
+    ///
+    /// A chave e sempre mascarada antes do envio - nunca e transmitida completa.
+    async fn send_alert(client: &Client, servico: &str, key: &str) {
+        let masked = mask_key_for_alert(key);
+        let alerta = client
+            .post(alert_url())
+            .json(&serde_json::json!({
+                "servico": servico,
+                "chaveMascarada": masked,
+            }))
+            .send()
+            .await;
+
+        match alerta {
+            Ok(response) if response.status().is_success() => {}
+            Ok(response) => {
+                eprintln!("Falha ao enviar alerta: HTTP {}", response.status());
+            }
+            Err(error) => {
+                eprintln!("Erro ao enviar alerta: {}", error);
+            }
+        }
+    }
+
     /// Creates a new Verifier instance.
     ///
     /// # Arguments
@@ -59,6 +109,7 @@ impl Verifier {
     /// # Returns
     /// * `Result<Self>` - Configured verifier or error
     pub fn new(concurrent: usize) -> Result<Self> {
+        let concurrent = concurrent.max(1);
         let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
 
         Ok(Self { client, concurrent })
@@ -422,8 +473,6 @@ impl Verifier {
 
         println!("{table}");
 
-        
-
         // Detailed list
         println!("\n{}", "Active Keys Details:".bright_white().underline());
         for (i, key) in keys.iter().enumerate() {
@@ -509,6 +558,7 @@ impl Verifier {
             "openai" => Self::verify_openai(client, key).await,
             "anthropic" => Self::verify_anthropic(client, key).await,
             "google" => Self::verify_google(client, key).await,
+            "grok" => Self::verify_grok(client, key).await,
             "groq" => Self::verify_groq(client, key).await,
             "perplexity" => Self::verify_perplexity(client, key).await,
             "huggingface" => Self::verify_huggingface(client, key).await,
@@ -520,10 +570,14 @@ impl Verifier {
             "deepseek" => Self::verify_deepseek(client, key).await,
             "github_token" => Self::verify_github(client, key).await,
             "gitlab" => Self::verify_gitlab(client, key).await,
+            "npm" => Self::verify_npm(client, key).await,
+            "pypi" => Self::verify_pypi(client, key).await,
             "stripe_live" | "stripe_restricted" => Self::verify_stripe(client, key).await,
+            "square" => Self::verify_square(client, key).await,
             "twilio" => Self::verify_twilio(client, key).await,
             "sendgrid" => Self::verify_sendgrid(client, key).await,
             "mailgun" => Self::verify_mailgun(client, key).await,
+            "mailchimp" => Self::verify_mailchimp(client, key).await,
             "slack_bot" | "slack_user" => Self::verify_slack(client, key).await,
             "discord" => Self::verify_discord(client, key).await,
             "telegram" => Self::verify_telegram(client, key).await,
@@ -533,6 +587,7 @@ impl Verifier {
             "sentry" => Self::verify_sentry(client, key).await,
             "newrelic" => Self::verify_newrelic(client, key).await,
             "datadog" => Self::verify_datadog(client, key).await,
+            "doppler" => Self::verify_doppler(client, key).await,
             _ => (
                 false,
                 "unsupported".to_string(),
@@ -570,32 +625,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "OpenAI",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "OpenAI", key).await;
+                        (true, "GET /v1/models".to_string(), None)
+                    }
                     401 => (false, "GET /v1/models".to_string(), None),
                     429 => (
                         false,
@@ -632,32 +664,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "Anthropic",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            }
+                        Self::send_alert(client, "Anthropic", key).await;
+                        (true, "POST /v1/messages".to_string(), None)
+                    }
                     401 => (false, "POST /v1/messages".to_string(), None),
                     400 => {
                         // Check if it's an auth error or just bad request
@@ -698,32 +707,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "Gemini",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "Google", key).await;
+                        (true, "GET /v1/models".to_string(), None)
+                    }
                     400 | 401 | 403 => (false, "GET /v1/models".to_string(), None),
                     429 => (
                         false,
@@ -754,33 +740,43 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "Grok",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                (true, "POST /v1/messages".to_string(), None)
-                            }
+                        Self::send_alert(client, "Groq", key).await;
+                        (true, "GET /openai/v1/models".to_string(), None)
+                    }
                     401 => (false, "GET /v1/models".to_string(), None),
+                    429 => (
+                        false,
+                        "GET /v1/models".to_string(),
+                        Some("rate limited".to_string()),
+                    ),
+                    _ => (
+                        false,
+                        "GET /v1/models".to_string(),
+                        Some(format!("status {}", status)),
+                    ),
+                }
+            }
+            Err(e) => (false, "GET /v1/models".to_string(), Some(e.to_string())),
+        }
+    }
+
+    /// Verifies an xAI Grok API key by listing available models (read-only).
+    async fn verify_grok(client: &Client, key: &str) -> (bool, String, Option<String>) {
+        let resp = client
+            .get("https://api.x.ai/v1/models")
+            .header("Authorization", format!("Bearer {}", key))
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) => {
+                let status = r.status().as_u16();
+                match status {
+                    200 => {
+                        Self::send_alert(client, "xAI Grok", key).await;
+                        (true, "GET /v1/models".to_string(), None)
+                    }
+                    401 | 403 => (false, "GET /v1/models".to_string(), None),
                     429 => (
                         false,
                         "GET /v1/models".to_string(),
@@ -812,32 +808,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "perplexity",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "Perplexity", key).await;
+                        (true, "POST /chat/completions".to_string(), None)
+                    }
                     401 => (false, "POST /chat/completions".to_string(), None),
                     429 => (
                         false,
@@ -872,32 +845,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "whoami",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "HuggingFace", key).await;
+                        (true, "GET /api/whoami-v2".to_string(), None)
+                    }
                     401 => (false, "GET /api/whoami-v2".to_string(), None),
                     _ => (
                         false,
@@ -922,7 +872,10 @@ impl Verifier {
             Ok(r) => {
                 let status = r.status().as_u16();
                 match status {
-                    200 => (true, "GET /v1/account".to_string(), None),
+                    200 => {
+                        Self::send_alert(client, "Replicate", key).await;
+                        (true, "GET /v1/account".to_string(), None)
+                    }
                     401 => (false, "GET /v1/account".to_string(), None),
                     _ => (
                         false,
@@ -948,32 +901,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "Fireworks",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "Fireworks", key).await;
+                        (true, "GET /inference/v1/models".to_string(), None)
+                    }
                     401 => (false, "GET /v1/models".to_string(), None),
                     _ => (
                         false,
@@ -999,32 +929,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "Coherec",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "Cohere", key).await;
+                        (true, "GET /v1/models".to_string(), None)
+                    }
                     401 => (false, "GET /v1/models".to_string(), None),
                     _ => (
                         false,
@@ -1050,32 +957,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "Mistral",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "Mistral", key).await;
+                        (true, "GET /v1/models".to_string(), None)
+                    }
                     401 => (false, "GET /v1/models".to_string(), None),
                     _ => (
                         false,
@@ -1101,32 +985,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "Together",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "Together", key).await;
+                        (true, "GET /v1/models".to_string(), None)
+                    }
                     401 => (false, "GET /v1/models".to_string(), None),
                     _ => (
                         false,
@@ -1151,7 +1012,10 @@ impl Verifier {
             Ok(r) => {
                 let status = r.status().as_u16();
                 match status {
-                    200 => (true, "GET /v1/models".to_string(), None),
+                    200 => {
+                        Self::send_alert(client, "DeepSeek", key).await;
+                        (true, "GET /v1/models".to_string(), None)
+                    }
                     401 => (false, "GET /v1/models".to_string(), None),
                     _ => (
                         false,
@@ -1180,32 +1044,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "Github",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "GitHub", key).await;
+                        (true, "GET /user".to_string(), None)
+                    }
                     401 => (false, "GET /user".to_string(), None),
                     _ => (
                         false,
@@ -1231,32 +1072,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "Git lab",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "GitLab", key).await;
+                        (true, "GET /api/v4/user".to_string(), None)
+                    }
                     401 => (false, "GET /api/v4/user".to_string(), None),
                     _ => (
                         false,
@@ -1266,6 +1084,62 @@ impl Verifier {
                 }
             }
             Err(e) => (false, "GET /api/v4/user".to_string(), Some(e.to_string())),
+        }
+    }
+
+    /// Verifies an NPM access token via the whoami endpoint (read-only).
+    async fn verify_npm(client: &Client, key: &str) -> (bool, String, Option<String>) {
+        let resp = client
+            .get("https://registry.npmjs.org/-/whoami")
+            .header("Authorization", format!("Bearer {}", key))
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) => {
+                let status = r.status().as_u16();
+                match status {
+                    200 => {
+                        Self::send_alert(client, "NPM", key).await;
+                        (true, "GET /-/whoami".to_string(), None)
+                    }
+                    401 | 403 => (false, "GET /-/whoami".to_string(), None),
+                    _ => (
+                        false,
+                        "GET /-/whoami".to_string(),
+                        Some(format!("status {}", status)),
+                    ),
+                }
+            }
+            Err(e) => (false, "GET /-/whoami".to_string(), Some(e.to_string())),
+        }
+    }
+
+    /// Verifies a PyPI API token with a read-only request (Basic auth as `__token__`).
+    async fn verify_pypi(client: &Client, key: &str) -> (bool, String, Option<String>) {
+        let resp = client
+            .get("https://pypi.org/simple/")
+            .basic_auth("__token__", Some(key))
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) => {
+                let status = r.status().as_u16();
+                match status {
+                    200 => {
+                        Self::send_alert(client, "PyPI", key).await;
+                        (true, "GET /simple/".to_string(), None)
+                    }
+                    401 | 403 => (false, "GET /simple/".to_string(), None),
+                    _ => (
+                        false,
+                        "GET /simple/".to_string(),
+                        Some(format!("status {}", status)),
+                    ),
+                }
+            }
+            Err(e) => (false, "GET /simple/".to_string(), Some(e.to_string())),
         }
     }
 
@@ -1284,32 +1158,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "stripe",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "Stripe", key).await;
+                        (true, "GET /v1/balance".to_string(), None)
+                    }
                     401 => (false, "GET /v1/balance".to_string(), None),
                     _ => (
                         false,
@@ -1319,6 +1170,39 @@ impl Verifier {
                 }
             }
             Err(e) => (false, "GET /v1/balance".to_string(), Some(e.to_string())),
+        }
+    }
+
+    /// Verifies a Square access token by reading merchant info (read-only).
+    async fn verify_square(client: &Client, key: &str) -> (bool, String, Option<String>) {
+        let resp = client
+            .get("https://connect.squareup.com/v2/merchants/me")
+            .header("Authorization", format!("Bearer {}", key))
+            .header("Square-Version", "2024-01-18")
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) => {
+                let status = r.status().as_u16();
+                match status {
+                    200 => {
+                        Self::send_alert(client, "Square", key).await;
+                        (true, "GET /v2/merchants/me".to_string(), None)
+                    }
+                    401 | 403 => (false, "GET /v2/merchants/me".to_string(), None),
+                    _ => (
+                        false,
+                        "GET /v2/merchants/me".to_string(),
+                        Some(format!("status {}", status)),
+                    ),
+                }
+            }
+            Err(e) => (
+                false,
+                "GET /v2/merchants/me".to_string(),
+                Some(e.to_string()),
+            ),
         }
     }
 
@@ -1348,32 +1232,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "sendgrid",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "SendGrid", key).await;
+                        (true, "GET /v3/scopes".to_string(), None)
+                    }
                     401 => (false, "GET /v3/scopes".to_string(), None),
                     _ => (
                         false,
@@ -1398,7 +1259,10 @@ impl Verifier {
             Ok(r) => {
                 let status = r.status().as_u16();
                 match status {
-                    200 => (true, "GET /v3/domains".to_string(), None),
+                    200 => {
+                        Self::send_alert(client, "Mailgun", key).await;
+                        (true, "GET /v3/domains".to_string(), None)
+                    }
                     401 => (false, "GET /v3/domains".to_string(), None),
                     _ => (
                         false,
@@ -1408,6 +1272,43 @@ impl Verifier {
                 }
             }
             Err(e) => (false, "GET /v3/domains".to_string(), Some(e.to_string())),
+        }
+    }
+
+    /// Verifies a Mailchimp API key (datacenter taken from the `-usN` suffix, read-only).
+    async fn verify_mailchimp(client: &Client, key: &str) -> (bool, String, Option<String>) {
+        let dc = key.rsplit('-').next().unwrap_or_default();
+        if dc.len() < 3 || !dc.starts_with("us") {
+            return (
+                false,
+                "GET /3.0/".to_string(),
+                Some("unexpected key format".to_string()),
+            );
+        }
+        let url = format!("https://{}.api.mailchimp.com/3.0/", dc);
+        let resp = client
+            .get(&url)
+            .basic_auth("keyhunter", Some(key))
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) => {
+                let status = r.status().as_u16();
+                match status {
+                    200 => {
+                        Self::send_alert(client, "Mailchimp", key).await;
+                        (true, "GET /3.0/".to_string(), None)
+                    }
+                    401 => (false, "GET /3.0/".to_string(), None),
+                    _ => (
+                        false,
+                        "GET /3.0/".to_string(),
+                        Some(format!("status {}", status)),
+                    ),
+                }
+            }
+            Err(e) => (false, "GET /3.0/".to_string(), Some(e.to_string())),
         }
     }
 
@@ -1426,33 +1327,8 @@ impl Verifier {
                 if r.status().is_success() {
                     let body = r.text().await.unwrap_or_default();
                     if body.contains("\"ok\":true") {
-                        {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "Slack",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                (true, "POST /v1/messages".to_string(), None)
-                            }
+                        Self::send_alert(client, "Slack", key).await;
+                        (true, "GET /api/auth.test".to_string(), None)
                     } else {
                         (false, "GET /api/auth.test".to_string(), None)
                     }
@@ -1481,32 +1357,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "Discord bot",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "Discord", key).await;
+                        (true, "GET /users/@me".to_string(), None)
+                    }
                     401 => (false, "GET /users/@me".to_string(), None),
                     _ => (
                         false,
@@ -1529,6 +1382,7 @@ impl Verifier {
                 if r.status().is_success() {
                     let body = r.text().await.unwrap_or_default();
                     if body.contains("\"ok\":true") {
+                        Self::send_alert(client, "Telegram", key).await;
                         (true, "GET /getMe".to_string(), None)
                     } else {
                         (false, "GET /getMe".to_string(), None)
@@ -1579,32 +1433,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "Mapbox",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "Mapbox", key).await;
+                        (true, "GET /tokens/v2".to_string(), None)
+                    }
                     401 => (false, "GET /tokens/v2".to_string(), None),
                     _ => (
                         false,
@@ -1642,32 +1473,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "New Relic",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "NewRelic", key).await;
+                        (true, "GET /v2/users.json".to_string(), None)
+                    }
                     401 => (false, "GET /v2/users.json".to_string(), None),
                     _ => (
                         false,
@@ -1693,32 +1501,9 @@ impl Verifier {
                 let status = r.status().as_u16();
                 match status {
                     200 => {
-                                let alerta = client
-                                    .post("http://bot-alertas:3001/alertas")
-                                    .json(&serde_json::json!({
-                                        "servico": "Datadog",
-                                        "chaveMascarada": key
-                                    }))
-                                    .send()
-                                    .await;
-
-                                match alerta {
-                                    Ok(response) if response.status().is_success() => {
-                                        // Alerta enviado com sucesso
-                                    }
-                                    Ok(response) => {
-                                        eprintln!(
-                                            "Falha ao enviar alerta: HTTP {}",
-                                            response.status()
-                                        );
-                                    }
-                                    Err(error) => {
-                                        eprintln!("Erro ao enviar alerta: {}", error);
-                                    }
-                                }
-
-                                return (true, "POST /v1/messages".to_string(), None)
-                            },
+                        Self::send_alert(client, "Datadog", key).await;
+                        (true, "GET /api/v1/validate".to_string(), None)
+                    }
                     403 => (false, "GET /api/v1/validate".to_string(), None),
                     _ => (
                         false,
@@ -1732,6 +1517,34 @@ impl Verifier {
                 "GET /api/v1/validate".to_string(),
                 Some(e.to_string()),
             ),
+        }
+    }
+
+    /// Verifies a Doppler service token via the workplace endpoint (read-only).
+    async fn verify_doppler(client: &Client, key: &str) -> (bool, String, Option<String>) {
+        let resp = client
+            .get("https://api.doppler.com/v3/workplace")
+            .header("Authorization", format!("Bearer {}", key))
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) => {
+                let status = r.status().as_u16();
+                match status {
+                    200 => {
+                        Self::send_alert(client, "Doppler", key).await;
+                        (true, "GET /v3/workplace".to_string(), None)
+                    }
+                    401 => (false, "GET /v3/workplace".to_string(), None),
+                    _ => (
+                        false,
+                        "GET /v3/workplace".to_string(),
+                        Some(format!("status {}", status)),
+                    ),
+                }
+            }
+            Err(e) => (false, "GET /v3/workplace".to_string(), Some(e.to_string())),
         }
     }
 
@@ -1786,9 +1599,104 @@ impl Verifier {
 /// # Returns
 /// * `String` - Original string if short enough, or truncated version
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    let count = s.chars().count();
+    if count <= max {
         s.to_string()
     } else {
-        format!("...{}", &s[s.len() - max + 3..])
+        format!("...{}", s.chars().skip(count - max + 3).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// Reads one full HTTP request (headers + body per Content-Length).
+    fn read_http_request(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set timeout");
+        let mut data = Vec::new();
+        let mut buf = [0u8; 1024];
+        let header_end = loop {
+            let n = stream.read(&mut buf).expect("read headers");
+            assert!(n > 0, "ligacao fechada antes dos headers");
+            data.extend_from_slice(&buf[..n]);
+            if let Some(pos) = find_subslice(&data, b"\r\n\r\n") {
+                break pos + 4;
+            }
+            assert!(data.len() < 65536, "headers demasiado grandes");
+        };
+        let headers = String::from_utf8_lossy(&data[..header_end]);
+        let body_len: usize = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.trim()
+                    .eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse().unwrap_or(0))
+            })
+            .unwrap_or(0);
+        while data.len() < header_end + body_len {
+            let n = stream.read(&mut buf).expect("read body");
+            assert!(n > 0, "ligacao fechada antes do body");
+            data.extend_from_slice(&buf[..n]);
+        }
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .expect("write response");
+        data
+    }
+
+    #[test]
+    fn test_mask_key_for_alert_never_leaks_full_key() {
+        assert_eq!(
+            mask_key_for_alert("sk-live-ABCDEFGHIJ1234567890"),
+            "sk-live-...7890"
+        );
+        assert_eq!(mask_key_for_alert("1234567890123456"), "12345678...");
+        assert_eq!(mask_key_for_alert("abc123"), "******");
+        assert_eq!(mask_key_for_alert(""), "");
+    }
+
+    #[tokio::test]
+    async fn test_send_alert_posts_masked_key_to_configured_url() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        std::env::set_var(
+            "KEYHUNTER_ALERT_URL",
+            format!("http://127.0.0.1:{}/alertas", port),
+        );
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            tx.send(read_http_request(&mut stream)).expect("send");
+        });
+
+        let client = Client::new();
+        Verifier::send_alert(&client, "OpenAI", "sk-test-SECRETKEY1234567890").await;
+
+        let raw = rx.recv_timeout(Duration::from_secs(10)).expect("request");
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.starts_with("POST /alertas "),
+            "request line: {}",
+            &text[..text.find("\r\n").unwrap_or(64)]
+        );
+        assert!(text.contains("OpenAI"), "servico em falta");
+        assert!(
+            !text.contains("SECRETKEY"),
+            "a chave completa nao pode ir no alerta"
+        );
+        assert!(text.contains("sk-test-...7890"), "chave mascarada em falta");
+
+        std::env::remove_var("KEYHUNTER_ALERT_URL");
     }
 }

@@ -153,6 +153,11 @@ impl GitHubClient {
     /// # Returns
     /// * `Result<GitHubClient>` - Configured client or error
     pub fn new(tokens: Vec<String>, concurrency: usize, delay_ms: u64) -> Result<Self> {
+        if tokens.is_empty() {
+            anyhow::bail!("At least one GitHub token is required");
+        }
+        // Semaphore with 0 permits would deadlock; clamp to at least 1.
+        let concurrency = concurrency.max(1);
         let mut clients = Vec::new();
 
         // Create one HTTP client per token

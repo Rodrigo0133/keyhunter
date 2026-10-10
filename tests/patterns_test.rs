@@ -204,7 +204,9 @@ fn test_slack_bot_pattern() {
 fn test_slack_user_pattern() {
     let pattern = Regex::new(r"xoxp-[0-9]{10,13}-[0-9]{10,13}-[0-9]{10,13}-[a-f0-9]{32}").unwrap();
 
-    assert!(pattern.is_match("xoxp-1234567890-9876543210-1122334455-abcdef0123456789abcdef0123456789"));
+    assert!(
+        pattern.is_match("xoxp-1234567890-9876543210-1122334455-abcdef0123456789abcdef0123456789")
+    );
 }
 
 #[test]

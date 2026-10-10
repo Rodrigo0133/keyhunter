@@ -153,9 +153,13 @@ async fn main() -> Result<()> {
 
             // Execute scan - either custom query or provider-based
             let findings = if let Some(q) = query {
-                scanner.search_custom(&q, &output_format, skip_output).await?
+                scanner
+                    .search_custom(&q, &output_format, skip_output)
+                    .await?
             } else {
-                scanner.scan_all(&provider, &output_format, skip_output).await?
+                scanner
+                    .scan_all(&provider, &output_format, skip_output)
+                    .await?
             };
 
             // If --verified-only flag, verify and filter to active keys only
@@ -165,7 +169,9 @@ async fn main() -> Result<()> {
                 let verifier = Verifier::new(5)?;
                 let limit = if verify_all { None } else { Some(50) };
 
-                verifier.verify_and_filter(findings, limit, &output_format).await?;
+                verifier
+                    .verify_and_filter(findings, limit, &output_format)
+                    .await?;
             }
         }
         Commands::Verify {

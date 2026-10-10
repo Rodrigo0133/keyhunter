@@ -1,6 +1,6 @@
 # Rust build artifacts
 target/
-discord-norifier/
+discord-notifier/
 # Config with real tokens
 config.toml
 

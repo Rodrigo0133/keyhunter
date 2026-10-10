@@ -9,6 +9,7 @@ use anyhow::Result;
 use chrono::Utc;
 use colored::*;
 use comfy_table::{modifiers::UTF8_ROUND_CORNERS, presets::UTF8_FULL, Cell, Color, Table};
+use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -74,6 +75,8 @@ pub struct Scanner {
     findings: Arc<Mutex<Vec<KeyFinding>>>,
     /// Set of seen keys for deduplication
     seen_keys: Arc<Mutex<HashSet<String>>>,
+    /// Set of seen file URLs to avoid re-fetching the same file
+    seen_urls: Arc<Mutex<HashSet<String>>>,
     /// Whether to show verbose output
     verbose: bool,
 }
@@ -99,6 +102,7 @@ impl Scanner {
             client,
             findings: Arc::new(Mutex::new(Vec::new())),
             seen_keys: Arc::new(Mutex::new(HashSet::new())),
+            seen_urls: Arc::new(Mutex::new(HashSet::new())),
             verbose,
         })
     }
@@ -361,7 +365,7 @@ impl Scanner {
         total_queries: usize,
     ) -> Result<Vec<KeyFinding>> {
         let queries = vec![
-            format!("{}", search_term),
+            search_term.to_string(),
             format!("{} filename:.env", search_term),
         ];
 
@@ -420,8 +424,12 @@ impl Scanner {
     ) -> Result<Vec<KeyFinding>> {
         let mut findings = Vec::new();
         let mut page = 1u32;
-        let per_page = 30u32;
-        let max_pages = (self.config.scan.max_results as u32 / per_page).clamp(1, 10);
+        let per_page = 100u32;
+        // GitHub only serves the first 1000 results per query (10 pages of
+        // 100), so anything above is clamped.
+        let max_pages = (self.config.scan.max_results as u32)
+            .div_ceil(per_page)
+            .clamp(1, 10);
 
         let pb = if !self.verbose {
             let pb = ProgressBar::new(max_pages as u64);
@@ -464,7 +472,16 @@ impl Scanner {
                         break;
                     }
 
-                    let item_count = response.items.len();
+                    // Skip files already returned by an earlier query — the same
+                    // file often matches several search terms.
+                    let items: Vec<SearchItem> = {
+                        let mut seen_urls = self.seen_urls.lock().await;
+                        response
+                            .items
+                            .into_iter()
+                            .filter(|item| seen_urls.insert(item.html_url.clone()))
+                            .collect()
+                    };
 
                     if self.verbose {
                         println!(
@@ -472,24 +489,43 @@ impl Scanner {
                             "·".bright_black(),
                             page,
                             max_pages,
-                            item_count.to_string().bright_cyan()
+                            items.len().to_string().bright_cyan()
                         );
                     }
 
-                    // Process items
-                    let mut page_keys = 0;
-                    for item in response.items {
-                        if self.is_interrupted() {
-                            break;
-                        }
+                    // Fetch + extract all files of this page concurrently.
+                    // Real throughput is throttled by the GitHub client's
+                    // semaphore (see `concurrency` in config.toml).
+                    let fetch_limit = self.config.github.concurrency.max(1).clamp(4, 32);
+                    let mut processed: Vec<(usize, SearchItem, Result<Vec<KeyFinding>>)> =
+                        futures::stream::iter(items.into_iter().enumerate())
+                            .map(|(i, item)| {
+                                let client = self.client.clone();
+                                async move {
+                                    let res = Self::process_item_verbose(
+                                        &client,
+                                        item.clone(),
+                                        provider,
+                                        false,
+                                    )
+                                    .await;
+                                    (i, item, res)
+                                }
+                            })
+                            .buffer_unordered(fetch_limit)
+                            .collect()
+                            .await;
+                    processed.sort_by_key(|(i, _, _)| *i);
 
+                    // Handle results in original order (stable output)
+                    let mut page_keys = 0;
+                    let mut page_findings = Vec::new();
+                    for (_, item, res) in processed {
                         let item_path = item.path.clone();
                         let item_repo = item.repository.full_name.clone();
                         let item_url = item.html_url.clone();
 
-                        match Self::process_item_verbose(&self.client, item, provider, self.verbose)
-                            .await
-                        {
+                        match res {
                             Ok(item_findings) => {
                                 let keys_found = item_findings.len();
                                 if keys_found > 0 {
@@ -506,19 +542,7 @@ impl Scanner {
                                         println!("          {}", item_url.bright_black());
                                     }
 
-                                    // Save to shared state in real-time for Ctrl+C safety
-                                    if save_realtime {
-                                        let mut shared_findings = self.findings.lock().await;
-                                        let mut shared_seen = self.seen_keys.lock().await;
-                                        for finding in &item_findings {
-                                            if !shared_seen.contains(&finding.key) {
-                                                shared_seen.insert(finding.key.clone());
-                                                shared_findings.push(finding.clone());
-                                            }
-                                        }
-                                    }
-
-                                    findings.extend(item_findings);
+                                    page_findings.extend(item_findings);
                                 } else if self.verbose {
                                     println!(
                                         "        {} {}/{} → no keys",
@@ -541,6 +565,19 @@ impl Scanner {
                             }
                         }
                     }
+
+                    // Bulk-merge into shared state (Ctrl+C safety + dedupe)
+                    if save_realtime && !page_findings.is_empty() {
+                        let mut shared_findings = self.findings.lock().await;
+                        let mut shared_seen = self.seen_keys.lock().await;
+                        for finding in &page_findings {
+                            if !shared_seen.contains(&finding.key) {
+                                shared_seen.insert(finding.key.clone());
+                                shared_findings.push(finding.clone());
+                            }
+                        }
+                    }
+                    findings.extend(page_findings);
 
                     if let Some(ref pb) = pb {
                         pb.set_message(format!("{} keys", page_keys));
@@ -838,9 +875,10 @@ impl Scanner {
 /// # Returns
 /// * `String` - Original string if short enough, or truncated version
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    let count = s.chars().count();
+    if count <= max {
         s.to_string()
     } else {
-        format!("...{}", &s[s.len() - max + 3..])
+        format!("...{}", s.chars().skip(count - max + 3).collect::<String>())
     }
 }

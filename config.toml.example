@@ -41,6 +41,20 @@ save_to_file = true
 output_path = "results"
 
 # ╔═══════════════════════════════════════════════════════════════════╗
+# ║  ALERTS - active (verified) keys are sent to the relay below,    ║
+# ║  which forwards them to your Discord webhook.                     ║
+# ║  Default (docker): http://bot-alertas:3000/alertas                ║
+# ║  Override with env var for runs outside docker:                   ║
+# ║    KEYHUNTER_ALERT_URL=http://localhost:3000/alertas              ║
+# ║  The Discord webhook itself lives in discord-notifier/.env as     ║
+# ║  DISCORD_WEBHOOK_URL.                                             ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+# NOTE: [alerts] is documentation-only for now; the URL is read from
+# the KEYHUNTER_ALERT_URL environment variable, not from this file.
+[alerts]
+# relay_url = "http://bot-alertas:3000/alertas"
+
+# ╔═══════════════════════════════════════════════════════════════════╗
 # ║  PROVIDERS - Enable/disable what to scan                         ║
 # ╚═══════════════════════════════════════════════════════════════════╝
 
