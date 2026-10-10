@@ -571,7 +571,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "OpenAI",
                                         "chaveMascarada": key
@@ -633,7 +633,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "Anthropic",
                                         "chaveMascarada": key
@@ -699,7 +699,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "Gemini",
                                         "chaveMascarada": key
@@ -755,7 +755,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "Grok",
                                         "chaveMascarada": key
@@ -813,7 +813,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "perplexity",
                                         "chaveMascarada": key
@@ -873,7 +873,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "whoami",
                                         "chaveMascarada": key
@@ -949,7 +949,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "Fireworks",
                                         "chaveMascarada": key
@@ -1000,7 +1000,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "Coherec",
                                         "chaveMascarada": key
@@ -1051,7 +1051,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "Mistral",
                                         "chaveMascarada": key
@@ -1102,7 +1102,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "Together",
                                         "chaveMascarada": key
@@ -1181,7 +1181,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "Github",
                                         "chaveMascarada": key
@@ -1232,7 +1232,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "Git lab",
                                         "chaveMascarada": key
@@ -1285,7 +1285,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "stripe",
                                         "chaveMascarada": key
@@ -1349,7 +1349,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "sendgrid",
                                         "chaveMascarada": key
@@ -1428,7 +1428,7 @@ impl Verifier {
                     if body.contains("\"ok\":true") {
                         {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "Slack",
                                         "chaveMascarada": key
@@ -1482,7 +1482,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "Discord bot",
                                         "chaveMascarada": key
@@ -1580,7 +1580,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "Mapbox",
                                         "chaveMascarada": key
@@ -1643,7 +1643,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "New Relic",
                                         "chaveMascarada": key
@@ -1694,7 +1694,7 @@ impl Verifier {
                 match status {
                     200 => {
                                 let alerta = client
-                                    .post("http://127.0.0.1:3000/alertas")
+                                    .post("http://bot-alertas:3000/alertas")
                                     .json(&serde_json::json!({
                                         "servico": "Datadog",
                                         "chaveMascarada": key
