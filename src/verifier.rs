@@ -20,13 +20,23 @@ use std::time::Duration;
 use crate::scanner::KeyFinding;
 
 /// Default alert relay URL (docker service `bot-alertas` -> discord-notifier).
-/// Overridable with the `KEYHUNTER_ALERT_URL` env var, e.g.
-/// `KEYHUNTER_ALERT_URL=http://localhost:3000/alertas` for runs outside docker.
 const ALERT_URL_DEFAULT: &str = "http://bot-alertas:3000/alertas";
 
-/// Alert relay URL, honoring the `KEYHUNTER_ALERT_URL` environment override.
-fn alert_url() -> String {
-    std::env::var("KEYHUNTER_ALERT_URL").unwrap_or_else(|_| ALERT_URL_DEFAULT.to_string())
+/// Candidate alert relay URLs, in order.
+///
+/// A single `KEYHUNTER_ALERT_URL` env var overrides everything. Otherwise we
+/// try each candidate until one answers, so alerting works whether keyhunter
+/// runs inside docker (`bot-alertas:3000`), on the host with a 3001->3000
+/// port mapping (`localhost:3001`), or against a local relay (`localhost:3000`).
+fn alert_urls() -> Vec<String> {
+    if let Ok(url) = std::env::var("KEYHUNTER_ALERT_URL") {
+        return vec![url];
+    }
+    vec![
+        ALERT_URL_DEFAULT.to_string(),
+        "http://localhost:3001/alertas".to_string(),
+        "http://localhost:3000/alertas".to_string(),
+    ]
 }
 
 /// Mascara uma chave para envio seguro em alertas.
@@ -81,24 +91,41 @@ impl Verifier {
     /// A chave e sempre mascarada antes do envio - nunca e transmitida completa.
     async fn send_alert(client: &Client, servico: &str, key: &str) {
         let masked = mask_key_for_alert(key);
-        let alerta = client
-            .post(alert_url())
-            .json(&serde_json::json!({
-                "servico": servico,
-                "chaveMascarada": masked,
-            }))
-            .send()
-            .await;
+        let urls = alert_urls();
+        let mut last_error = String::new();
+        for url in urls.clone() {
+            let alerta = client
+                .post(url)
+                .json(&serde_json::json!({
+                    "servico": servico,
+                    "chaveMascarada": masked,
+                }))
+                .send()
+                .await;
 
-        match alerta {
-            Ok(response) if response.status().is_success() => {}
-            Ok(response) => {
-                eprintln!("Falha ao enviar alerta: HTTP {}", response.status());
-            }
-            Err(error) => {
-                eprintln!("Erro ao enviar alerta: {}", error);
+            match alerta {
+                Ok(response) if response.status().is_success() => {
+                    println!(
+                        "{} Alerta Discord enviado: {} ({})",
+                        "🔔".bright_magenta(),
+                        servico.bright_yellow(),
+                        masked.bright_black()
+                    );
+                    return;
+                }
+                Ok(response) => {
+                    last_error = format!("HTTP {}", response.status());
+                }
+                Err(error) => {
+                    last_error = error.to_string();
+                }
             }
         }
+        eprintln!(
+            "Falha ao enviar alerta (tentei {} relay(s)): {}",
+            urls.len(),
+            last_error
+        );
     }
 
     /// Creates a new Verifier instance.

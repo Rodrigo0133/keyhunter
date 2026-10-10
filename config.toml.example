@@ -49,8 +49,9 @@ output_path = "results"
 # ║  The Discord webhook itself lives in discord-notifier/.env as     ║
 # ║  DISCORD_WEBHOOK_URL.                                             ║
 # ╚═══════════════════════════════════════════════════════════════════╝
-# NOTE: [alerts] is documentation-only for now; the URL is read from
-# the KEYHUNTER_ALERT_URL environment variable, not from this file.
+# NOTE: [alerts] is documentation-only for now. Without KEYHUNTER_ALERT_URL,
+# keyhunter tries in order: http://bot-alertas:3000/alertas (docker),
+# http://localhost:3001/alertas and http://localhost:3000/alertas (host).
 [alerts]
 # relay_url = "http://bot-alertas:3000/alertas"
 
