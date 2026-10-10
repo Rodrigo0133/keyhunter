@@ -5,16 +5,17 @@ const app = express();
 app.use(express.json());
 
 app.post("/alertas", async (req, res) => {
-  const { servico, chaveMascarada } = req.body;
+  const { servico, chave, chaveMascarada } = req.body;
+  const chaveFinal = typeof chave === "string" ? chave : chaveMascarada;
 
-  if (typeof servico !== "string" || typeof chaveMascarada !== "string") {
+  if (typeof servico !== "string" || typeof chaveFinal !== "string") {
     res.status(400).json({ erro: "Dados inválidos." });
     return;
   }
 
   try {
     await enviarMensagem(
-      `Possível exposição confirmada\nServiço: ${servico}\nChave: ${chaveMascarada}`,
+      `Possível exposição confirmada\nServiço: ${servico}\nChave: ${chaveFinal}`,
     );
 
     res.sendStatus(204);

